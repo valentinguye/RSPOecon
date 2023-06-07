@@ -55,6 +55,9 @@ md <- read_excel(file.path("input_data", "manufacturing_directories", "direktori
 # IBS desa geometries 
 ibs_desa <- readRDS(file.path("input_data", "IBSmills_desageom.Rdata"))
 
+# IBS Kabupaten geometries
+district_sf <- st_read(file.path("input_data", "district2000_sf"))
+
 ## PREPARE IBS DATA -------------------------------------
 
 # Remove IBS manufactories that are matched with Universal Mill List (UML)
@@ -236,14 +239,17 @@ nrow(ibs_md_long)
 nrow(ibs_desa[!duplicated(ibs_desa$firm_id),]) == nrow(ibs_desa)
 # and it goes only to 2010 at the latest. The desa variable was not shipped for years after 2010.
 # so missing geometries are not recent firms. 
-ibs_desa <- dplyr::select(ibs_desa, firm_id, geom) 
+ibs_desa <- dplyr::select(ibs_desa, firm_id, desa_id, geom) 
 # import geo names from here, because they are the most recent valid ones. 
 ibs_desa <- dplyr::filter(ibs_desa, !is.na(geom))
 
 ibs_desa <- st_as_sf(ibs_desa, crs = 4326)
 
 # append it to the main data 
-ibs_md_long_desa <- left_join(ibs_md_long, ibs_desa, by = "firm_id")
+ibs_md_long_desa <- 
+  ibs_md_long %>% 
+  select(-desa_id) %>% 
+  left_join(ibs_desa, by = "firm_id")
 
 
 # Keep only useful variables
@@ -261,7 +267,7 @@ ibs_md_long_desa <-
                 n_match, i_n_match, 
                 wtn_cfl_names, no_md_match, one_md_match, svl_md_match,
                 workers_nbs,  md_no_workers,
-                district_name, kec_name, village_name, 
+                district_name, district_id, kec_name, village_name, desa_id, # desa_id is from IBSmills_desageom
                 geom
   )
 # in_ton_ffb_imp1,	in_ton_ffb_imp2, out_ton_cpo_imp1,	out_ton_cpo_imp2,	out_ton_pko_imp1, out_ton_pko_imp2,	
@@ -288,7 +294,61 @@ ibs_md_long_desa <- dplyr::filter(ibs_md_long_desa, !st_is_empty(ibs_geom)) #
 ibs_md_long_desa <- st_as_sf(ibs_md_long_desa)
 ibs_md_long_desa
 
+#### District geom #### 
+# To those with no desa, attribute a district shape 
 
+# Match on names, since many IBS don't have a district ID bust only a district name
+ibs_md %>% filter(district_id=="" & district_name!="") %>% nrow()
+ibs_md %>% filter(district_id!="" & district_name=="") %>% nrow()
+
+district_sf$name_ <- str_replace(string = district_sf$name_, pattern = "Kab. ", replacement = "")
+
+# clean names a bit
+district_names <- district_sf$name_ %>% sort()
+ibs_dn <- unique(ibs_md$district_name) %>% sort()
+ibs_dn[which(!(ibs_dn %in% district_names))] 
+district_names
+
+ibs_md <- 
+  ibs_md %>% 
+  mutate(district_name = gsub(pattern = "*", replacement="", x=district_name),
+         district_name = gsub(pattern = "D U M A I", replacement="Dumai", x=district_name),
+         district_name = gsub(pattern = "Bangka Barat", replacement="Bangka", x=district_name),
+         district_name = gsub(pattern = "Bangka Selatan", replacement="Bangka", x=district_name),
+         district_name = gsub(pattern = "Batanghari", replacement="Batang Hari", x=district_name),
+         district_name = gsub(pattern = "Bulungan", replacement="Bulongan", x=district_name),
+         district_name = gsub(pattern = "Jakarta Utara", replacement="Kota Jakarta Utara", x=district_name),
+         district_name = gsub(pattern = "Kodya Jakarta Utara", replacement="Kota Jakarta Utara", x=district_name),
+         district_name = gsub(pattern = "Kodya Jakarta Timur", replacement="Kota Jakarta Timur", x=district_name),
+         district_name = gsub(pattern = "B A T A M", replacement="Batam", x=district_name),
+         district_name = gsub(pattern = "Kota Serang", replacement="Serang", x=district_name),
+         district_name = gsub(pattern = "Kota Tangerang Selatan", replacement="Kota Tangerang", x=district_name),
+         district_name = gsub(pattern = "Labuhan Batu Selatan", replacement="Labuhan Batu", x=district_name),
+         district_name = gsub(pattern = "Labuhan Batu Utara", replacement="Labuhan Batu", x=district_name),
+         district_name = gsub(pattern = "Mamuju Tengah", replacement="Mamuju", x=district_name),
+         district_name = gsub(pattern = "Mamuju Utara", replacement="Mamuju", x=district_name),
+         district_name = gsub(pattern = "Minahasa Selatan", replacement="Minahasa", x=district_name),
+         # The areas that have separated from South Tapanuli Regency (Tapanuli Selatan) are the new regencies of 
+         # Mandailing Natal (created on 23 November 1998), 
+         # Padang Lawas Utara and 
+         # Padang Lawas (both created on 17 July 2007), 
+         # all lying to the south-east of the residual South Tapanuli Regency, plus the city (kota) of Padang Sidempuan 
+         # (created on 21 June 2001).
+         district_name = gsub(pattern = "Padang Lawas", replacement="Tapanuli Selatan", x=district_name),
+         district_name = gsub(pattern = "Padang Lawas Utara", replacement="Tapanuli Selatan", x=district_name),
+         district_name = gsub(pattern = "Pasaman Barat", replacement="Pasaman", x=district_name),
+         district_name = gsub(pattern = "S I A K", replacement="Siak", x=district_name),
+         district_name = gsub(pattern = "Serdang Bedagai", replacement="Deli Serdang", x=district_name), # not really exact but better than nothing
+         district_name = gsub(pattern = "Sijunjung", replacement="Sawahlunto/Sijunjung", x=district_name), # not really exact but better than nothing
+         district_name = gsub(pattern = "Solok Selatan", replacement="Solok", x=district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
+         district_name = gsub(pattern = "Tanah Bumbu", replacement="Kota Baru", x=district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
+  )
+
+ibs_md_long_kabu <- 
+  ibs_md_long_nodesa %>% 
+  left_join(district_sf, by = c("ibs_district_id" = "d__2000"))
+
+anyNA(ibs_md_long_kabu$geometry)
 
 ## TRASE-IBS MATCH, BY DESA ####
 
@@ -374,7 +434,7 @@ length(unique(spj$ibs_firm_id))
 pot_mto <- spj[!(duplicated(spj$trase_id) | 
                  duplicated(spj$trase_id, fromLast = TRUE)), ] 
 length(unique(pot_mto$trase_id))
-# these are the 25 potential one-to-many matches 
+# these are the 25 potential many-to-one matches 
 # (the Trase refinery is the sole one to be in the  village and 
 # there may be several Trase refineries in this same village.). 
 
@@ -428,14 +488,19 @@ spj_tocheck <-
          ibs_min_year, ibs_max_year,
          everything(), 
          -aide_id, -group_name, -province, -country, -kcp, -rspo_certified, -rspo_model, 
-         latitude, longitude) %>% 
+         ibs_desa_id, latitude, longitude) %>% 
   arrange(oto, mto, trase_id, ibs_firm_id)
 
 View(spj_tocheck)
 
 spj_tocheck <- 
   spj_tocheck %>% 
-  filter(!(trase_id=="R-0003" & ibs_firm_id %in% c(43309, 54263)))%>% 
+  mutate(matched_ibs_firm_id = case_when(
+    trase_id=="R-0003" ~ 50459, 
+    trase_id=="R-0003" ~ 
+    TRUE ~ ibs_firm_id
+  ))
+  filter(!( & ibs_firm_id %in% c(43309, 54263)))%>% 
   filter(!(trase_id=="R-0003" & ibs_firm_id %in% c(43309, 54263)))
 
 # Remove matches with IBS plants that are either producing more than known capacity, 
@@ -443,7 +508,21 @@ spj_tocheck <-
 
 
 # export for external inspection
-write.xlsx2(spj_tocheck, file.path("temp_data", "trase_ibs_md_spatjoin.xlsx"))
+du_tocheck <- 
+  spj_tocheck %>% 
+  filter(du) %>% 
+  select(ibs_desa_id, trase_id, ibs_firm_id, everything()) %>% 
+  arrange(ibs_desa_id, trase_id, ibs_firm_id)
+
+write.xlsx2(du_tocheck, file.path("temp_data", "du_tocheck.xlsx"))
+
+mto_tocheck <- 
+  spj_tocheck %>% 
+  filter(mto) %>% 
+  select(ibs_desa_id, trase_id, ibs_firm_id, everything()) %>% 
+  arrange(ibs_desa_id, trase_id, ibs_firm_id)
+
+write.xlsx2(mto_tocheck, file.path("temp_data", "mto_tocheck.xlsx"))
 
 
 
