@@ -29,7 +29,6 @@ dir.create("temp_data/processed_refinery_geolocalization")
 
 ## Workstation set-up ------------------------------------------------------
 library(tidyverse)
-# library(plyr)
 library(aws.s3)
 library(sf)
 library(sjmisc)
@@ -66,6 +65,14 @@ ibs_noUML <- dplyr::filter(ibs_uml, ibs_uml$uml_matched_sample == 0)
 # sum(ibs_noUML_cs$uml_matched_sample)  # 470
 # sum(ibs_noUML_cs$is_mill) # 930 (they sourced FFB at least once or sold CPO or PKO at least once, and that they are not located in Java or in Bali)
 
+# Make a consolidate variable to gauge plant size 
+ibs_noUML <-
+  ibs_noUML %>% 
+  mutate(thru_ton_cpo_imp1 = case_when(
+    !is.na(in_ton_cpo_imp1) ~ in_ton_cpo_imp1,
+    TRUE ~ out_ton_rpo_imp1*1.053 # the conversion ratio used in Trase https://resources.trase.earth/documents/data_methods/SEI_PCS_Indonesia_palm_1.2._EN.pdf
+    )) 
+
 #### Cross-sectional variables ####  
 # collapse to cross section, based on some summarized values
 ibs_noUML <- 
@@ -78,12 +85,15 @@ ibs_noUML <-
           avg_in_ton_cpo_imp1 = mean(in_ton_cpo_imp1, na.rm = TRUE), 
           avg_out_ton_rpo_imp1 = mean(out_ton_rpo_imp1, na.rm = TRUE),
           avg_out_ton_rpko_imp1 = mean(out_ton_rpko_imp1, na.rm = TRUE),
+          avg_thru_ton_cpo_imp1 = mean(thru_ton_cpo_imp1, na.rm = TRUE),
           min_in_ton_cpo_imp1 = min(in_ton_cpo_imp1, na.rm = TRUE), 
           min_out_ton_rpo_imp1 = min(out_ton_rpo_imp1, na.rm = TRUE),
           min_out_ton_rpko_imp1 = min(out_ton_rpko_imp1, na.rm = TRUE),
+          min_thru_ton_cpo_imp1 = min(thru_ton_cpo_imp1, na.rm = TRUE),
           max_in_ton_cpo_imp1 = max(in_ton_cpo_imp1, na.rm = TRUE), 
           max_out_ton_rpo_imp1 = max(out_ton_rpo_imp1, na.rm = TRUE),
-          max_out_ton_rpko_imp1 = max(out_ton_rpko_imp1, na.rm = TRUE)) %>% 
+          max_out_ton_rpko_imp1 = max(out_ton_rpko_imp1, na.rm = TRUE),
+          max_thru_ton_cpo_imp1 = max(thru_ton_cpo_imp1, na.rm = TRUE)) %>% 
   ungroup() %>% 
 # THE WARNINGS are for plants that have only NAs on some of these variables
 
@@ -213,28 +223,69 @@ for(i in unique(ibs_md$firm_id)){
   ibs_md[ibs_md$firm_id == i, "n_diff_names"] <- length(unique(unlist(names)))
 }
 
+#### Change data dimensions #### 
+
+# # REMOVE TEMPORAL DIMENSION 
 ibs_md_panel <- ibs_md
-# # REMOVE TEMPORAL DIMENSION - NO, because it happens that the firm_id of a plant changes through time
+
+# Keep only year-constant (useful) variables
+ibs_md <- 
+  ibs_md %>% 
+  select(firm_id, year, min_year, max_year,
+         # thru_ton_cpo_imp1, in_ton_cpo_imp1, out_ton_rpo_imp1, out_ton_rpko_imp1, 
+         # starts_with("any_"), 
+         starts_with("avg_"), 
+         # starts_with("min_"), 
+         starts_with("max_"), 
+         inout_refinery,
+         diff_names, n_diff_names, 
+         n_match, i_n_match, 
+         wtn_cfl_names, no_md_match, one_md_match, svl_md_match,
+         workers_nbs,  
+         district_name, district_id, kec_name, village_name,
+         y
+  )
+# in_ton_ffb_imp1,	in_ton_ffb_imp2, out_ton_cpo_imp1,	out_ton_cpo_imp2,	out_ton_pko_imp1, out_ton_pko_imp2,	
+# out_ton_rpo_imp1, out_ton_rpo_imp2, out_ton_rpko_imp1, out_ton_rpko_imp2,
+# pct_own_cent_gov_imp,	pct_own_loc_gov_imp,	pct_own_nat_priv_imp,	pct_own_for_imp)
+
+# label IBS variables 
+names(ibs_md)[!grepl("md_", names(ibs_md))] <- 
+  paste0("ibs_", names(ibs_md)[!grepl("md_", names(ibs_md))])
+# # this is necessary for sf to keep recognizing the geom column
+# st_geometry(ibs_md) <- "ibs_geom"
+
+# Remove duplicates in id and matched info in MD
 ibs_md <-
   ibs_md %>%
-  distinct(firm_id, y, .keep_all = TRUE) %>%
-  select(-year)
+  distinct(ibs_firm_id, ibs_y, .keep_all = TRUE) %>%
+  select(-ibs_year)
+# at this stage, there may still be duplicated ibs_firm_id, for those ibs firms that match different info in MD.  
+nrow(ibs_md) == length(unique(ibs_md$ibs_firm_id))
 
-nrow(ibs_md)
-
-# RESHAPE TO LONG ON MD MATCHES
-# Unnest to keep info on main product, in addition to company name info 
-ibs_md_long <- 
+# Unnest to keep all info on main product and company name from MD 
+ibs_md_cs <- 
   ibs_md %>% 
-  tidyr::unnest(cols = y, 
-                keep_empty = TRUE)
+  tidyr::unnest(cols = ibs_y, 
+                keep_empty = TRUE) %>% 
+  # BUT don't keep a md_long format, because problematic for firm_id uniqueness analysis below (in characterizing spatial matches)
+  group_by(ibs_firm_id) %>% 
+  mutate(md_company_name = paste0(unique(md_company_name), " (", unique(md_year), ")", collapse = "; ") ,
+         md_main_product = paste0(unique(md_main_product), " (", unique(md_year), ")", collapse = "; ") ,
+         md_no_workers = paste0(unique(md_no_workers), " (", unique(md_year), ")", collapse = "; ") ,
+         md_address = paste0(unique(md_address), " (", unique(md_year), ")", collapse = "; ") ,
+         md_head_off_address = paste0(unique(md_head_off_address), " (", unique(md_year), ")", collapse = "; ") 
+         ) %>% 
+  ungroup() %>% 
+  distinct(ibs_firm_id, .keep_all = TRUE)
 
-nrow(ibs_md_long)
+nrow(ibs_md_cs) == length(unique(ibs_md_cs$ibs_firm_id))
+
+
 # rm(ibs_md, grp_n_match)
 
 
 #### Desa geom #### 
-
 # - note that this is a cross section
 nrow(ibs_desa[!duplicated(ibs_desa$firm_id),]) == nrow(ibs_desa)
 # and it goes only to 2010 at the latest. The desa variable was not shipped for years after 2010.
@@ -246,111 +297,101 @@ ibs_desa <- dplyr::filter(ibs_desa, !is.na(geom))
 ibs_desa <- st_as_sf(ibs_desa, crs = 4326)
 
 # append it to the main data 
-ibs_md_long_desa <- 
-  ibs_md_long %>% 
-  select(-desa_id) %>% 
-  left_join(ibs_desa, by = "firm_id")
-
-
-# Keep only useful variables
-ibs_md_long_desa <- 
-  ibs_md_long_desa %>% 
-  select(firm_id, min_year, max_year,
-                out_ton_rpo_imp1, out_ton_rpko_imp1, in_ton_cpo_imp1, 
-                # starts_with("any_"), 
-                starts_with("avg_"), 
-                # starts_with("min_"), 
-                starts_with("max_"), 
-                inout_refinery,
-                md_main_product,
-                diff_names, md_company_name, md_year, n_diff_names, 
-                n_match, i_n_match, 
-                wtn_cfl_names, no_md_match, one_md_match, svl_md_match,
-                workers_nbs,  md_no_workers,
-                district_name, district_id, kec_name, village_name, desa_id, # desa_id is from IBSmills_desageom
-                geom
-  )
-# in_ton_ffb_imp1,	in_ton_ffb_imp2, out_ton_cpo_imp1,	out_ton_cpo_imp2,	out_ton_pko_imp1, out_ton_pko_imp2,	
-# out_ton_rpo_imp1, out_ton_rpo_imp2, out_ton_rpko_imp1, out_ton_rpko_imp2,
-# pct_own_cent_gov_imp,	pct_own_loc_gov_imp,	pct_own_nat_priv_imp,	pct_own_for_imp)
-
-# label IBS variables 
-names(ibs_md_long_desa)[!grepl("md_", names(ibs_md_long_desa))] <- 
-  paste0("ibs_", names(ibs_md_long_desa)[!grepl("md_", names(ibs_md_long_desa))])
-# # this is necessary for sf to keep recognizing the geom column
-# st_geometry(ibs_md_long_desa) <- "ibs_geom"
-
+ibs_md_cs <- 
+  ibs_md_cs %>% 
+  left_join(ibs_desa, by = c("ibs_firm_id" = "firm_id"))
 
 # split the data set into those with valid desa polygon, and those without (either bc they appeared after 2010, or because they have an invalid polygon)
 
 # these are those that cannot be matched with spatial help 
-ibs_md_long_nodesa <- dplyr::filter(ibs_md_long_desa, st_is_empty(ibs_geom)) 
+ibs_md_cs_nodesa <- dplyr::filter(ibs_md_cs, st_is_empty(geom)) 
 # remove the geom column from the other objects
-ibs_md_long_nodesa <- dplyr::select(ibs_md_long_nodesa, -ibs_geom)
+ibs_md_cs_nodesa <- dplyr::select(ibs_md_cs_nodesa, -geom)
 
 # make those with desa a spatial data frame 
-ibs_md_long_desa <- dplyr::filter(ibs_md_long_desa, !st_is_empty(ibs_geom)) #
-
-ibs_md_long_desa <- st_as_sf(ibs_md_long_desa)
-ibs_md_long_desa
+ibs_md_cs_desa <- dplyr::filter(ibs_md_cs, !st_is_empty(geom)) #
+ibs_md_cs_desa <- st_as_sf(ibs_md_cs_desa)
+ibs_md_cs_desa
 
 #### District geom #### 
 # To those with no desa, attribute a district shape 
 
 # Match on names, since many IBS don't have a district ID bust only a district name
-ibs_md %>% filter(district_id=="" & district_name!="") %>% nrow()
-ibs_md %>% filter(district_id!="" & district_name=="") %>% nrow()
+ibs_md %>% filter(ibs_district_id=="" & ibs_district_name!="") %>% nrow()
+ibs_md %>% filter(ibs_district_id!="" & ibs_district_name=="") %>% nrow()
 
 district_sf$name_ <- str_replace(string = district_sf$name_, pattern = "Kab. ", replacement = "")
 
-# clean names a bit
+# clean names in IBS a bit
 district_names <- district_sf$name_ %>% sort()
-ibs_dn <- unique(ibs_md$district_name) %>% sort()
-ibs_dn[which(!(ibs_dn %in% district_names))] 
+ibs_dn <- unique(ibs_md$ibs_district_name) %>% sort()
+ibs_dn[which(!(ibs_dn %in% district_names))]
 district_names
 
-ibs_md <- 
-  ibs_md %>% 
-  mutate(district_name = gsub(pattern = "*", replacement="", x=district_name),
-         district_name = gsub(pattern = "D U M A I", replacement="Dumai", x=district_name),
-         district_name = gsub(pattern = "Bangka Barat", replacement="Bangka", x=district_name),
-         district_name = gsub(pattern = "Bangka Selatan", replacement="Bangka", x=district_name),
-         district_name = gsub(pattern = "Batanghari", replacement="Batang Hari", x=district_name),
-         district_name = gsub(pattern = "Bulungan", replacement="Bulongan", x=district_name),
-         district_name = gsub(pattern = "Jakarta Utara", replacement="Kota Jakarta Utara", x=district_name),
-         district_name = gsub(pattern = "Kodya Jakarta Utara", replacement="Kota Jakarta Utara", x=district_name),
-         district_name = gsub(pattern = "Kodya Jakarta Timur", replacement="Kota Jakarta Timur", x=district_name),
-         district_name = gsub(pattern = "B A T A M", replacement="Batam", x=district_name),
-         district_name = gsub(pattern = "Kota Serang", replacement="Serang", x=district_name),
-         district_name = gsub(pattern = "Kota Tangerang Selatan", replacement="Kota Tangerang", x=district_name),
-         district_name = gsub(pattern = "Labuhan Batu Selatan", replacement="Labuhan Batu", x=district_name),
-         district_name = gsub(pattern = "Labuhan Batu Utara", replacement="Labuhan Batu", x=district_name),
-         district_name = gsub(pattern = "Mamuju Tengah", replacement="Mamuju", x=district_name),
-         district_name = gsub(pattern = "Mamuju Utara", replacement="Mamuju", x=district_name),
-         district_name = gsub(pattern = "Minahasa Selatan", replacement="Minahasa", x=district_name),
+# WORK ONLY ON THE SUBSET THAT HAS NO DESA, because for those with desa, we won't use the district. 
+ibs_md_cs_nodesa <- 
+  ibs_md_cs_nodesa %>% 
+  mutate(ibs_district_name = gsub(pattern = "*", replacement="", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "D U M A I", replacement="Dumai", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Bangka Barat", replacement="Bangka", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Bangka Selatan", replacement="Bangka", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Batanghari", replacement="Batang Hari", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Bulungan", replacement="Bulongan", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Jakarta Utara", replacement="Kota Jakarta Utara", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Kodya Jakarta Barat", replacement="Kota Jakarta Barat", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Kodya Jakarta Utara", replacement="Kota Jakarta Utara", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Kodya Jakarta Timur", replacement="Kota Jakarta Timur", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "B A T A M", replacement="Batam", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Kota Serang", replacement="Serang", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Kota Tangerang Selatan", replacement="Kota Tangerang", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Labuhan Batu Selatan", replacement="Labuhan Batu", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Labuhan Batu Utara", replacement="Labuhan Batu", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Mamuju Tengah", replacement="Mamuju", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Mamuju Utara", replacement="Mamuju", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Minahasa Selatan", replacement="Minahasa", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Ogan Ilir", replacement="Ogan Komering Ilir", x=ibs_district_name),
          # The areas that have separated from South Tapanuli Regency (Tapanuli Selatan) are the new regencies of 
          # Mandailing Natal (created on 23 November 1998), 
          # Padang Lawas Utara and 
          # Padang Lawas (both created on 17 July 2007), 
          # all lying to the south-east of the residual South Tapanuli Regency, plus the city (kota) of Padang Sidempuan 
          # (created on 21 June 2001).
-         district_name = gsub(pattern = "Padang Lawas", replacement="Tapanuli Selatan", x=district_name),
-         district_name = gsub(pattern = "Padang Lawas Utara", replacement="Tapanuli Selatan", x=district_name),
-         district_name = gsub(pattern = "Pasaman Barat", replacement="Pasaman", x=district_name),
-         district_name = gsub(pattern = "S I A K", replacement="Siak", x=district_name),
-         district_name = gsub(pattern = "Serdang Bedagai", replacement="Deli Serdang", x=district_name), # not really exact but better than nothing
-         district_name = gsub(pattern = "Sijunjung", replacement="Sawahlunto/Sijunjung", x=district_name), # not really exact but better than nothing
-         district_name = gsub(pattern = "Solok Selatan", replacement="Solok", x=district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
-         district_name = gsub(pattern = "Tanah Bumbu", replacement="Kota Baru", x=district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
+         ibs_district_name = gsub(pattern = "Padang Lawas", replacement="Tapanuli Selatan", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Padang Lawas Utara", replacement="Tapanuli Selatan", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Pasaman Barat", replacement="Pasaman", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "S I A K", replacement="Siak", x=ibs_district_name),
+         ibs_district_name = gsub(pattern = "Serdang Bedagai", replacement="Deli Serdang", x=ibs_district_name), # not really exact but better than nothing
+         ibs_district_name = gsub(pattern = "Sijunjung", replacement="Sawahlunto/Sijunjung", x=ibs_district_name), # not really exact but better than nothing
+         ibs_district_name = gsub(pattern = "Solok Selatan", replacement="Solok", x=ibs_district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
+         ibs_district_name = gsub(pattern = "Tanah Bumbu", replacement="Kota Baru", x=ibs_district_name), # Solok 2000 shape comprises Solok Selatan created in 2004. 
   )
 
-ibs_md_long_kabu <- 
-  ibs_md_long_nodesa %>% 
-  left_join(district_sf, by = c("ibs_district_id" = "d__2000"))
+# append kabu shape to the main data 
+ibs_md_cs_nodesa <- 
+  ibs_md_cs_nodesa %>% 
+  left_join(district_sf, by = c("ibs_district_name" = "name_"))
 
-anyNA(ibs_md_long_kabu$geometry)
+# ibs_md_cs_nodesa %>% filter(!is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs_nodesa %>% filter(is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs_nodesa %>% pull(ibs_firm_id) %>% unique() %>% length()
+# 
+# # keep cleaning district names, since we are currently potentially missing 17 refineries
+# ibs_md_cs_nodesa %>% filter(is.na(d__2000) & ibs_inout_refinery) %>% pull(ibs_firm_id) %>% unique() %>% length()
 
-## TRASE-IBS MATCH, BY DESA ####
+# split between those with a district and those without 
+
+# these are those that cannot be matched with spatial help 
+ibs_md_cs_nodesa_nokabu <- dplyr::filter(ibs_md_cs_nodesa, st_is_empty(geometry)) 
+# remove the geom column from the other objects
+ibs_md_cs_nodesa_nokabu <- dplyr::select(ibs_md_cs_nodesa_nokabu, -geometry)
+
+# make those with kabu a spatial data frame 
+ibs_md_cs_nodesa_kabu <- dplyr::filter(ibs_md_cs_nodesa, !st_is_empty(geometry)) #
+ibs_md_cs_nodesa_kabu <- st_as_sf(ibs_md_cs_nodesa_kabu)
+ibs_md_cs_nodesa_kabu
+
+
+## MATCH TRASE-IBS, BY DESA ####
 
 #### Spatial join #### 
 
@@ -360,26 +401,29 @@ trase$longitude <- as.numeric(trase$longitude)
 
 trase <- st_as_sf(trase,	coords	=	c("longitude",	"latitude"), crs = 4326, remove = FALSE)
 
-fullspj <- st_join(x = trase, y = ibs_md_long_desa, left = T) # the default is st_intersect.
+fullspj_desa <- st_join(x = trase, y = ibs_md_cs_desa, left = T, join = st_within) # the default is st_intersect.
 # it's a left join, so it keeps all refineries from x, and only those of y that match.  
 # trase_ids <- unique(trase$ref_id)
-# all(trase_ids %in% unique(fullspj$ref_id))
+# all(trase_ids %in% unique(fullspj_desa$ref_id))
 
 #plot(st_geometry(ibs_noUML[ibs_noUML$firm_id == 1761,]))
 #plot(st_geometry(uml[uml$mill_name == "PT. Socfin - Seumanyam",]), add = TRUE, col = "red")
 
 # plot(st_geometry(trase))
-# plot(st_geometry(ibs_md_long_desa), add = T)
-fullspj <- st_drop_geometry(fullspj)
+# plot(st_geometry(ibs_md_cs_desa), add = T)
+fullspj_desa <- st_drop_geometry(fullspj_desa)
 
 
 #### Spot cases where the same refinery has had different firm_id in IBS ####
 pot_svl_id <- 
-  fullspj %>% 
+  fullspj_desa %>% 
   group_by(trase_id) %>% 
   filter(min(ibs_max_year) < max(ibs_min_year)) %>% 
   ungroup() %>% 
-  left_join(ibs_md_panel, by = c("ibs_firm_id" = "firm_id"), 
+  left_join(ibs_md_panel %>% select(firm_id, year,
+                                    in_ton_cpo_imp1, out_ton_rpo_imp1, out_ton_rpko_imp1, in_ton_ffb_imp1, out_ton_cpo_imp1
+                                    ), 
+            by = c("ibs_firm_id" = "firm_id"), 
             multiple = "all")
 
 pot_svl_id %>% 
@@ -398,8 +442,8 @@ pot_svl_id %>%
 # In some cases, no hint that it's the same plant with different firm_id, but we still want to discard 
 # some firm_id from being matched with trase refineries, since they only have one year record, 
 # while another that matches has more for instance
-fullspj <-
-  fullspj %>% 
+fullspj_desa <-
+  fullspj_desa %>% 
   mutate(adhoc_discard = case_when(
            ibs_firm_id==55623 ~ FALSE, 
            ibs_firm_id==66732 ~ FALSE, 
@@ -409,30 +453,251 @@ fullspj <-
 
 #### Characterize spatial matches ####  
 
+# Preliminary, prepare vars to resolve some conflicts programmatically: 
+fullspj_desa <- 
+  fullspj_desa %>%
+  mutate(cap_over = ibs_max_thru_ton_cpo_imp1 > cap_final_mtperyr, # TRASE CAPACITY VAR IS IN CPO
+         # avg_dist_to_cap = cap_final_mtperyr - (ibs_avg_out_ton_rpo_imp1 + ibs_avg_out_ton_rpko_imp1),
+         # min_dist_to_cap = cap_final_mtperyr - (ibs_max_out_ton_rpo_imp1 + ibs_max_out_ton_rpko_imp1),
+         
+         # Flag matches with IBS plants that either process more than known capacity,
+         # or that have no cpo input or rpo/rpko output.
+         improbable_match = cap_over | !ibs_inout_refinery,
+         
+         # Round to ease manual work
+         across(.cols = contains("_ton_"), .fns = round)
+  )
+
+  
 # NOTES! 
 # 1 - The code used to characterize needs the temporal duplicates to be removed already
 # 2 - This is all from the perspective of Trase refineries - not IBS. 
 
 # There are 97 refineries
-length(unique(fullspj$trase_id))
+length(unique(fullspj_desa$trase_id))
 # with 73 distinct names
-length(unique(fullspj$comp_name)) 
+length(unique(fullspj_desa$comp_name)) 
 
-# Since we charecterize spatial matches, we look only at the subset of refineries that matched something
-spj <- 
-  fullspj %>% 
+# Since we characterize spatial matches, we look only at the subset of refineries that matched something
+spj_desa <- 
+  fullspj_desa %>% 
   filter(!is.na(ibs_firm_id))
 # this is 45 Trase refineries
-length(unique(spj$trase_id))
+length(unique(spj_desa$trase_id))
 
-length(unique(spj$ibs_firm_id))
+length(unique(spj_desa$ibs_firm_id))
 # They fall in the village polygon of 45 IBS plants (unique ibs_firm_id) 
 # i.e. 45 IBS plants are in a village where at least one Trase refinery stands. 
 ## So, the maximum number of pre-2011 IBS plants we can hope to spatially match with Trase refineries is 46.
 ## The minimum number is 8 (unless we double-check them with workers and some don't match). 
 
-pot_mto <- spj[!(duplicated(spj$trase_id) | 
-                 duplicated(spj$trase_id, fromLast = TRUE)), ] 
+pot_mto <- spj_desa[!(duplicated(spj_desa$trase_id) | 
+                      duplicated(spj_desa$trase_id, fromLast = TRUE)), ] 
+length(unique(pot_mto$trase_id))
+# these are the 30 potential many-to-one matches 
+# (the Trase refinery is the sole one to be in the  village and 
+# there may be several Trase refineries in this same village.). 
+
+# Among them, there are:
+oto <- pot_mto[!(duplicated(pot_mto$ibs_firm_id) | duplicated(pot_mto$ibs_firm_id, fromLast = TRUE)), ] 
+length(unique(oto$trase_id))
+# 11 Trase refineries that fall in the village of one and only one IBS plant 
+
+mto <- pot_mto[duplicated(pot_mto$ibs_firm_id) | duplicated(pot_mto$ibs_firm_id, fromLast = TRUE), ]
+length(unique(mto$trase_id))
+nrow(distinct(mto, ibs_firm_id))
+# 19 Trase refineries are at least 2 to fall in the village of the same IBS plant. These IBS plants are 8. 
+
+du <-
+  spj_desa %>% 
+  # look at all refineries that fall in a village where there are more than one IBS plant
+  filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) %>% 
+  # remove some of these conflicts programmatically: 
+  filter(!improbable_match) %>%
+  filter(adhoc_discard) %>% 
+  # and keep those that are still duplicated after that
+  filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) 
+  
+length(unique(du$trase_id))
+length(unique(du$ibs_firm_id))
+# 7 trase refineries fall in a village where there are more than one IBS plant, 
+# matching with 13 IBS plants.
+
+# FINAL OTO
+# add to spatial oto, those that are oto after programmatic conflict resolution
+oto_autores <- 
+  spj_desa %>% 
+    # look at all refineries that fall in a village where there are more than one IBS plant
+    filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) %>% 
+    # remove some of these conflicts programmatically: 
+    filter(!improbable_match) %>%
+    filter(adhoc_discard) %>% 
+    # and keep those that are NOT duplicated after that
+    filter(!(duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) 
+
+oto <- rbind(oto, oto_autores)
+# this adds 6 more oto matches
+length(unique(oto$trase_id))
+
+# FINAL NOTO
+noto <- rbind(mto, du)
+length(unique(noto$trase_id))
+# these are the 26 Trase refineries (19 + 7) that 
+# fall within the desa of an IBS plant (ibs_firm_id)
+# but are either several to fall within this desa (mto)
+# or there are more than one IBS plant in this desa (otm)
+# or both (mtm)
+# We don't really care to distinguish between those
+
+# Inspect
+du %>%
+  select(desa_id, trase_id, ibs_firm_id, 
+         improbable_match, adhoc_discard,
+         ibs_min_year, ibs_max_year,
+         comp_name, ref_name, md_company_name, type, product, md_main_product,
+
+         contains("cap_"),
+         ibs_max_thru_ton_cpo_imp1, ibs_avg_thru_ton_cpo_imp1,
+         ibs_max_out_ton_rpko_imp1, ibs_avg_out_ton_rpko_imp1,
+         ibs_max_in_ton_cpo_imp1, ibs_avg_in_ton_cpo_imp1,
+         ibs_max_out_ton_rpo_imp1, ibs_avg_out_ton_rpo_imp1,
+
+         everything(),
+         -aide_id, -group_name, -province, -country, -kcp, -rspo_certified, -rspo_model,
+         desa_id, latitude, longitude) %>%
+  arrange(desa_id, trase_id, ibs_firm_id) %>%
+  # filter(desa_id %in% c(1219040015, 1272050002)) %>%
+  View()
+
+# inspect oto firm_id in ibs_md_cs
+# ibs_md_cs %>% 
+#   filter(ibs_firm_id %in% oto$ibs_firm_id)  %>% 
+#   filter(desa_id %in% c(3515150009, 3515140008, 1218100022)) %>%
+#   View()
+
+
+spj_desa_tocheck <- 
+  spj_desa %>% 
+  mutate(oto = trase_id %in% oto$trase_id, 
+         noto = trase_id %in% noto$trase_id, 
+         mto = trase_id %in% mto$trase_id, 
+         du = trase_id %in% du$trase_id) %>% 
+  
+  select(oto, noto, desa_id, trase_id, ibs_firm_id, 
+         ibs_min_year, ibs_max_year,
+         comp_name, ref_name, md_company_name, type, product, md_main_product,
+
+         contains("cap_"),
+         ibs_max_thru_ton_cpo_imp1, ibs_avg_thru_ton_cpo_imp1,
+         ibs_max_out_ton_rpko_imp1, ibs_avg_out_ton_rpko_imp1,
+         ibs_max_in_ton_cpo_imp1, ibs_avg_in_ton_cpo_imp1,
+         ibs_max_out_ton_rpo_imp1, ibs_avg_out_ton_rpo_imp1,
+
+         everything(), 
+         -aide_id, -group_name, -province, -country, -kcp, -rspo_certified, -rspo_model, 
+         desa_id, latitude, longitude) %>% 
+  arrange(oto, desa_id, trase_id, ibs_firm_id)
+
+View(spj_desa_tocheck)
+
+
+# export for external inspection
+write.xlsx2(spj_desa_tocheck, file.path("temp_data", "spj_desa_tocheck.xlsx"))
+
+#### RESOLVE CONFLICTS HERE #### 
+# spj_desa_tocheck <- 
+#   spj_desa_tocheck %>% 
+#   mutate(matched_ibs_firm_id = case_when(
+#     trase_id=="R-0003" ~ 50459, 
+#     # trase_id=="R-0003" ~ 
+#     TRUE ~ ibs_firm_id
+#   ))
+
+
+## MATCH TRASE-IBS (w/o desa), BY KABUPATEN ####
+
+#### Remove trase refineries already matched based on desa and manually verified ####
+
+spj_desa_tocheck <- read_excel(file.path("temp_data", "spj_desa_tocheck.xlsx"))
+
+spj_desa_tocheck %>% 
+  filter(noto==TRUE) %>%
+  arrange(desa_id) %>% 
+  View()
+
+spj_desa_tocheck %>% filter(trase_id=="R-0074") %>% View()
+
+
+trase_unmatchedyet <- 
+  trase %>% 
+  filter(!(trase_id %in% spj_desa_solved$trase_id))
+
+#### Spatial join #### 
+sf_use_s2(FALSE)
+fullspj_kabu <- st_join(x = trase_unmatchedyet, y = ibs_md_cs_nodesa_kabu, left = T) # the default is st_intersect.
+fullspj_kabu <- st_drop_geometry(fullspj_kabu)
+
+
+#### Spot cases where the same refinery has had different firm_id in IBS ####
+pot_svl_id2 <- 
+  fullspj_kabu %>% 
+  group_by(trase_id) %>% 
+  filter(min(ibs_max_year) < max(ibs_min_year)) %>% 
+  ungroup() %>% 
+  left_join(ibs_md_panel, by = c("ibs_firm_id" = "firm_id"), 
+            multiple = "all")
+
+pot_svl_id2 %>% 
+  mutate(across(.cols = contains("_ton_"), .fns = round)) %>% 
+  select(trase_id, comp_name, md_company_name,
+         ibs_firm_id, year, 
+         ibs_min_year, ibs_max_year, 
+         ibs_inout_refinery, 
+         in_ton_cpo_imp1, out_ton_rpo_imp1, out_ton_rpko_imp1, in_ton_ffb_imp1, out_ton_cpo_imp1) %>% 
+  arrange(trase_id, ibs_firm_id, year)%>% 
+  View()
+
+# 50460 is just not a refinery apparently. Thus, no need to merge it with 54263, as it will not create a conflict. 
+# And we don't want to spuriously add info on other variables (like ownership, ffb or cpo) to the final trase-IBS refinery data set.  
+
+# In some cases, no hint that it's the same plant with different firm_id, but we still want to discard 
+# some firm_id from being matched with trase refineries, since they only have one year record, 
+# while another that matches has more for instance
+# fullspj_desa <-
+#   fullspj_desa %>% 
+#   mutate(adhoc_discard = case_when(
+#     ibs_firm_id==55623 ~ FALSE, 
+#     ibs_firm_id==66732 ~ FALSE, 
+#     TRUE ~ TRUE
+#   ))
+
+
+#### Characterize spatial matches ####  
+
+# NOTES! 
+# 1 - The code used to characterize needs the temporal duplicates to be removed already
+# 2 - This is all from the perspective of Trase refineries - not IBS. 
+
+# There are 97 refineries
+length(unique(fullspj_kabu$trase_id))
+# with 73 distinct names
+length(unique(fullspj_kabu$comp_name)) 
+
+# Since we charecterize spatial matches, we look only at the subset of refineries that matched something
+spj_kabu <- 
+  fullspj_kabu %>% 
+  filter(!is.na(ibs_firm_id))
+# this is 45 Trase refineries
+length(unique(spj_kabu$trase_id))
+
+length(unique(spj_kabu$ibs_firm_id))
+# They fall in the village polygon of 45 IBS plants (unique ibs_firm_id) 
+# i.e. 45 IBS plants are in a village where at least one Trase refinery stands. 
+## So, the maximum number of pre-2011 IBS plants we can hope to spatially match with Trase refineries is 46.
+## The minimum number is 8 (unless we double-check them with workers and some don't match). 
+
+pot_mto <- spj_kabu[!(duplicated(spj_kabu$trase_id) | 
+                        duplicated(spj_kabu$trase_id, fromLast = TRUE)), ] 
 length(unique(pot_mto$trase_id))
 # these are the 25 potential many-to-one matches 
 # (the Trase refinery is the sole one to be in the  village and 
@@ -448,7 +713,7 @@ length(unique(mto$trase_id))
 nrow(distinct(mto, ibs_firm_id))
 # 17 Trase refineries are at least 2 to fall in the village of the same IBS plant. These IBS plants are 7. 
 
-du <- spj[(duplicated(spj$trase_id) | duplicated(spj$trase_id, fromLast = TRUE)), ]
+du <- spj_kabu[(duplicated(spj_kabu$trase_id) | duplicated(spj_kabu$trase_id, fromLast = TRUE)), ]
 length(unique(du$trase_id))
 length(unique(du$ibs_firm_id))
 # 20 trase refineries fall in a village where there are more than one IBS plant, 
@@ -459,8 +724,8 @@ length(unique(noto$trase_id))
 # these are the 37 Trase refineries (17 + 20) that fall within the desa of an IBS plant and are either m:m, o:m or m:o with ibs_firm_id. 
 
 
-spj_tocheck <- 
-  spj %>% 
+spj_kabu_tocheck <- 
+  spj_kabu %>% 
   mutate(oto = trase_id %in% oto$trase_id, 
          mto = trase_id %in% mto$trase_id, 
          du = trase_id %in% du$trase_id, 
@@ -473,58 +738,23 @@ spj_tocheck <-
          
          # Round to ease manual work
          across(.cols = contains("_ton_"), .fns = round)
-         ) %>% 
+  ) %>% 
   
   # Resolve some conflicts programmatically: 
   filter(!(noto & improbable_match)) %>%
-
+  
   select(oto, mto, du, trase_id, comp_name, ref_name, md_company_name, type, product, 
          md_main_product,
          contains("cap_"),
          ibs_firm_id, adhoc_discard,
          ibs_max_in_ton_cpo_imp1, ibs_avg_in_ton_cpo_imp1,
          ibs_max_out_ton_rpo_imp1, ibs_max_out_ton_rpko_imp1,
-       
+         
          ibs_min_year, ibs_max_year,
          everything(), 
          -aide_id, -group_name, -province, -country, -kcp, -rspo_certified, -rspo_model, 
          ibs_desa_id, latitude, longitude) %>% 
   arrange(oto, mto, trase_id, ibs_firm_id)
-
-View(spj_tocheck)
-
-spj_tocheck <- 
-  spj_tocheck %>% 
-  mutate(matched_ibs_firm_id = case_when(
-    trase_id=="R-0003" ~ 50459, 
-    trase_id=="R-0003" ~ 
-    TRUE ~ ibs_firm_id
-  ))
-  filter(!( & ibs_firm_id %in% c(43309, 54263)))%>% 
-  filter(!(trase_id=="R-0003" & ibs_firm_id %in% c(43309, 54263)))
-
-# Remove matches with IBS plants that are either producing more than known capacity, 
-# or that have no cpo input or rpo/rpko output. 
-
-
-# export for external inspection
-du_tocheck <- 
-  spj_tocheck %>% 
-  filter(du) %>% 
-  select(ibs_desa_id, trase_id, ibs_firm_id, everything()) %>% 
-  arrange(ibs_desa_id, trase_id, ibs_firm_id)
-
-write.xlsx2(du_tocheck, file.path("temp_data", "du_tocheck.xlsx"))
-
-mto_tocheck <- 
-  spj_tocheck %>% 
-  filter(mto) %>% 
-  select(ibs_desa_id, trase_id, ibs_firm_id, everything()) %>% 
-  arrange(ibs_desa_id, trase_id, ibs_firm_id)
-
-write.xlsx2(mto_tocheck, file.path("temp_data", "mto_tocheck.xlsx"))
-
-
 
 
 ## TRASE-IBS MATCH, BY COMPANY NAME ####
@@ -532,12 +762,12 @@ write.xlsx2(mto_tocheck, file.path("temp_data", "mto_tocheck.xlsx"))
 # need to clean md_company_name column with the same process that cleaned trase_company. 
 
 # en attendant : 
-ibs_md_long[ibs_md_long$md_company_name=="JAMPALAN BARU", "md_company_name"] <- "TANJUNG SARANA LESTARI"
+ibs_md_cs[ibs_md_cs$md_company_name=="JAMPALAN BARU", "md_company_name"] <- "TANJUNG SARANA LESTARI"
 
 # let's do an equality join
 trase_ibs_by_desaname <- 
   trase_ibs_bydesa %>% 
-  left_join(ibs_md_long,
+  left_join(ibs_md_cs,
             by = c("trase_company" = "md_company_name"), 
             multiple = "all")
 
@@ -546,7 +776,7 @@ trase_ibs_by_desaname <-
 trase_ibs_by_desaname <- 
   trase_ibs_bydesa %>% 
   mutate(dummy = TRUE) %>% 
-  left_join(ibs_md_long %>% mutate(dummy = TRUE), 
+  left_join(ibs_md_cs %>% mutate(dummy = TRUE), 
             by = "dummy") %>% 
   filter(trase_company %in% diff_names) %>% 
   dplyr::select(-dummy)
@@ -559,7 +789,7 @@ trase_ibs_by_desaname <-
 ## Those that have a desa polygon but match with no Trase refinery (414) ####
 # It is useless to try to find them manually with the directory number of workers and uml's list. 
 # we can still find their names with directories and google-search them, and/or directly spot them manually within their villages. 
-ibs_unref <- left_join(x = ibs_md_long_desa, y = st_set_geometry(oto[,c("firm_id","lat")], NULL), by = "firm_id")
+ibs_unref <- left_join(x = ibs_md_cs_desa, y = st_set_geometry(oto[,c("firm_id","lat")], NULL), by = "firm_id")
 ibs_unref <- filter(ibs_unref, is.na(ibs_unref$lat))
 
 ibs_unref <- left_join(x = ibs_unref, y = st_set_geometry(noto[,c("firm_id","lon")], NULL), by = "firm_id")
