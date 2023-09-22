@@ -270,11 +270,11 @@ ibs_md_cs <-
                 keep_empty = TRUE) %>% 
   # BUT don't keep a md_long format, because problematic for firm_id uniqueness analysis below (in characterizing spatial matches)
   group_by(ibs_firm_id) %>% 
-  mutate(md_company_name = paste0(unique(md_company_name), " (", unique(md_year), ")", collapse = "; ") ,
-         md_main_product = paste0(unique(md_main_product), " (", unique(md_year), ")", collapse = "; ") ,
-         md_no_workers = paste0(unique(md_no_workers), " (", unique(md_year), ")", collapse = "; ") ,
-         md_address = paste0(unique(md_address), " (", unique(md_year), ")", collapse = "; ") ,
-         md_head_off_address = paste0(unique(md_head_off_address), " (", unique(md_year), ")", collapse = "; ") 
+  mutate(md_company_name = paste0(md_company_name, " (", md_year, ")", collapse = "; ") ,
+         md_main_product = paste0(md_main_product, " (", md_year, ")", collapse = "; ") ,
+         md_no_workers = paste0(md_no_workers, " (", md_year, ")", collapse = "; ") ,
+         md_address = paste0(md_address, " (", md_year, ")", collapse = "; ") ,
+         md_head_off_address = paste0(md_head_off_address, " (", md_year, ")", collapse = "; ") 
          ) %>% 
   ungroup() %>% 
   distinct(ibs_firm_id, .keep_all = TRUE)
@@ -466,7 +466,11 @@ fullspj_desa <-
          
          # Round to ease manual work
          across(.cols = contains("_ton_"), .fns = round)
-  )
+  ) %>% 
+  # tag when a refinery matches only ibs plants that are improbable match
+  group_by(trase_id) %>% 
+  mutate(all_unlikely = all(improbable_match) | all(!adhoc_discard)) %>% 
+  ungroup()
 
   
 # NOTES! 
@@ -512,9 +516,10 @@ du <-
   spj_desa %>% 
   # look at all refineries that fall in a village where there are more than one IBS plant
   filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) %>% 
-  # remove some of these conflicts programmatically: 
-  filter(!improbable_match) %>%
-  filter(adhoc_discard) %>% 
+  # remove some of these conflicts programmatically 
+  # refineries that have only unlikely matches are KEPT in du, for manual inspection
+  filter(!improbable_match | all_unlikely) %>%
+  filter(adhoc_discard | all_unlikely) %>% 
   # and keep those that are still duplicated after that
   filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) 
   
@@ -529,20 +534,21 @@ oto_autores <-
   spj_desa %>% 
     # look at all refineries that fall in a village where there are more than one IBS plant
     filter((duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) %>% 
-    # remove some of these conflicts programmatically: 
-    filter(!improbable_match) %>%
-    filter(adhoc_discard) %>% 
+    # remove some of these conflicts programmatically 
+    # (& !all_unlikely makes sure that we are talking about conflicts between likely and unlikely matches, not only between unlikely matches)
+    filter(!improbable_match & !all_unlikely) %>%
+    filter(adhoc_discard & !all_unlikely) %>% 
     # and keep those that are NOT duplicated after that
     filter(!(duplicated(trase_id) | duplicated(trase_id, fromLast = TRUE))) 
 
 oto <- rbind(oto, oto_autores)
-# this adds 6 more oto matches
+# this adds 6 more oto matches, going up to 17 oto matches
 length(unique(oto$trase_id))
 
 # FINAL NOTO
 noto <- rbind(mto, du)
 length(unique(noto$trase_id))
-# these are the 26 Trase refineries (19 + 7) that 
+# these are the 28 Trase refineries (19 + 9) that 
 # fall within the desa of an IBS plant (ibs_firm_id)
 # but are either several to fall within this desa (mto)
 # or there are more than one IBS plant in this desa (otm)
@@ -550,9 +556,9 @@ length(unique(noto$trase_id))
 # We don't really care to distinguish between those
 
 # Inspect
-du %>%
+spj_desa %>%
   select(desa_id, trase_id, ibs_firm_id, 
-         improbable_match, adhoc_discard,
+         improbable_match, adhoc_discard, all_unlikely,
          ibs_min_year, ibs_max_year,
          comp_name, ref_name, md_company_name, type, product, md_main_product,
 
@@ -577,7 +583,8 @@ du %>%
 
 
 spj_desa_tocheck <- 
-  spj_desa %>% 
+  noto %>% 
+  rbind(oto) %>% 
   mutate(oto = trase_id %in% oto$trase_id, 
          noto = trase_id %in% noto$trase_id, 
          mto = trase_id %in% mto$trase_id, 
