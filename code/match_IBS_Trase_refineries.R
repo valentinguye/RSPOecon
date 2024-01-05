@@ -329,8 +329,9 @@ ibs_dn[which(!(ibs_dn %in% district_names))]
 district_names
 
 # WORK ONLY ON THE SUBSET THAT HAS NO DESA, because for those with desa, we won't use the district. 
-ibs_md_cs_nodesa <- 
-  ibs_md_cs_nodesa %>% 
+# NO, work on whole data, because we will want to include those that have a desa but don't get matched based on it. 
+ibs_md_cs <- 
+  ibs_md_cs %>% 
   mutate(ibs_district_name = gsub(pattern = "*", replacement="", x=ibs_district_name),
          ibs_district_name = gsub(pattern = "D U M A I", replacement="Dumai", x=ibs_district_name),
          ibs_district_name = gsub(pattern = "Bangka Barat", replacement="Bangka", x=ibs_district_name),
@@ -367,28 +368,47 @@ ibs_md_cs_nodesa <-
   )
 
 # append kabu shape to the main data 
-ibs_md_cs_nodesa <- 
-  ibs_md_cs_nodesa %>% 
+ibs_md_cs <- 
+  ibs_md_cs %>% 
   left_join(district_sf, by = c("ibs_district_name" = "name_"))
 
-# ibs_md_cs_nodesa %>% filter(!is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
-# ibs_md_cs_nodesa %>% filter(is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
-# ibs_md_cs_nodesa %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs %>% filter(!is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs %>% filter(is.na(d__2000)) %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs %>% pull(ibs_firm_id) %>% unique() %>% length()
 # 
 # # keep cleaning district names, since we are currently potentially missing 17 refineries
-# ibs_md_cs_nodesa %>% filter(is.na(d__2000) & ibs_inout_refinery) %>% pull(ibs_firm_id) %>% unique() %>% length()
+# ibs_md_cs %>% filter(is.na(d__2000) & ibs_inout_refinery) %>% pull(ibs_firm_id) %>% unique() %>% length()
+ibs_md_cs %>% class()
+ibs_md_cs$geom %>% class()
+ibs_md_cs$geometry %>% class()
 
-# split between those with a district and those without 
+# since case_when does not work with sfc vars, we row bind
+ibs_md_cs_smallest_shp <- 
+  rbind(
+    # subset of empty desa polygons ("geom"), with valid or empty district polygons ("geometry") 
+    ibs_md_cs %>% 
+      filter(st_is_empty(geom)) %>% 
+      select(-geom), 
+    
+    # subset of non-empty desa polygons, with the district polygon column replaced by the desa one. 
+    ibs_md_cs %>% 
+      filter(!st_is_empty(geom)) %>% 
+      mutate(geometry = geom) %>% 
+      select(-geom) # necessary to force drop 
+  ) %>% 
+  st_as_sf(sf_column_name = "geometry") 
+  
+# split between those with a shape and those without 
 
 # these are those that cannot be matched with spatial help 
-ibs_md_cs_nodesa_nokabu <- dplyr::filter(ibs_md_cs_nodesa, st_is_empty(geometry)) 
+ibs_md_cs_noshp <- dplyr::filter(ibs_md_cs_smallest_shp, st_is_empty(geometry)) 
 # remove the geom column from the other objects
-ibs_md_cs_nodesa_nokabu <- dplyr::select(ibs_md_cs_nodesa_nokabu, -geometry)
+ibs_md_cs_noshp <- dplyr::select(ibs_md_cs_noshp, -geometry)
 
-# make those with kabu a spatial data frame 
-ibs_md_cs_nodesa_kabu <- dplyr::filter(ibs_md_cs_nodesa, !st_is_empty(geometry)) #
-ibs_md_cs_nodesa_kabu <- st_as_sf(ibs_md_cs_nodesa_kabu)
-ibs_md_cs_nodesa_kabu
+# make those with shape a working spatial data frame 
+ibs_md_cs_shp <- dplyr::filter(ibs_md_cs_smallest_shp, !st_is_empty(geometry)) #
+ibs_md_cs_shp <- st_as_sf(ibs_md_cs_shp)
+ibs_md_cs_shp
 
 
 ## MATCH TRASE-IBS, BY DESA ####
@@ -525,8 +545,8 @@ du <-
   
 length(unique(du$trase_id))
 length(unique(du$ibs_firm_id))
-# 7 trase refineries fall in a village where there are more than one IBS plant, 
-# matching with 13 IBS plants.
+# 9 trase refineries fall in a village where there are more than one IBS plant, 
+# matching with 15 IBS plants.
 
 # FINAL OTO
 # add to spatial oto, those that are oto after programmatic conflict resolution
@@ -548,6 +568,7 @@ length(unique(oto$trase_id))
 # FINAL NOTO
 noto <- rbind(mto, du)
 length(unique(noto$trase_id))
+length(unique(noto$ibs_firm_id))
 # these are the 28 Trase refineries (19 + 9) that 
 # fall within the desa of an IBS plant (ibs_firm_id)
 # but are either several to fall within this desa (mto)
@@ -592,7 +613,7 @@ spj_desa_tocheck <-
   
   select(oto, noto, desa_id, trase_id, ibs_firm_id, 
          ibs_min_year, ibs_max_year,
-         comp_name, ref_name, md_company_name, type, product, md_main_product,
+         comp_name, ref_name, md_company_name, md_address, md_head_off_address, type, product, md_main_product,
 
          contains("cap_"),
          ibs_max_thru_ton_cpo_imp1, ibs_avg_thru_ton_cpo_imp1,
@@ -611,7 +632,12 @@ View(spj_desa_tocheck)
 # export for external inspection
 write.xlsx2(spj_desa_tocheck, file.path("temp_data", "spj_desa_tocheck.xlsx"))
 
-#### RESOLVE CONFLICTS HERE #### 
+# spj_desa_tocheck_previous <- 
+#   read.xlsx2(file = file.path("temp_data", "spj_desa_tocheck.xlsx"), 
+#            sheetIndex = 1)
+# names(spj_desa_tocheck_previous)[!names(spj_desa_tocheck_previous) %in% names(spj_desa_tocheck)]
+
+#### Integrate checked and solved conflicts #### 
 # spj_desa_tocheck <- 
 #   spj_desa_tocheck %>% 
 #   mutate(matched_ibs_firm_id = case_when(
@@ -620,28 +646,114 @@ write.xlsx2(spj_desa_tocheck, file.path("temp_data", "spj_desa_tocheck.xlsx"))
 #     TRUE ~ ibs_firm_id
 #   ))
 
+spj_desa_checked <- read.xlsx2(file = file.path("input_data", "spj_desa_tocheck_solved_nov2023.xlsx"), 
+                               sheetIndex = 1) %>% 
+  mutate(oto = as.logical(oto), 
+         noto = as.logical(noto))
 
-## MATCH TRASE-IBS (w/o desa), BY KABUPATEN ####
+# When ibs_firm_id_ucsb is "N/A", the match is deemed unplausible by Jason Benedict, based on additional info from Auriga. 
+# When ibs_firm_id_ucsb is an IBS firm_id, it is deemed plausible by Jason. 
+# When it is left empty "", there is no discarding nor confirming information. 
 
-#### Remove trase refineries already matched based on desa and manually verified ####
+# Drop all matches with N/A
+spj_desa_checked <- 
+  spj_desa_checked %>% 
+  mutate(checked_implausible = ibs_firm_id_ucsb == "N/A" | 
+                               # And the case where the only other match is more plausible 
+                               (trase_id == "R-0083" & ibs_firm_id == "52413")) 
 
-spj_desa_tocheck <- read_excel(file.path("temp_data", "spj_desa_tocheck.xlsx"))
+# Flag remaining conflicts (- code is sanity checked !)
+spj_desa_checked <- 
+  spj_desa_checked %>% 
+  mutate(still_unmatched = (
+           checked_implausible | (!checked_implausible & ibs_firm_id_ucsb == "" & noto)
+           )) %>% 
+  select(oto, noto, desa_id, trase_id, ibs_firm_id, ibs_firm_id_ucsb, comment, still_unmatched, checked_implausible, everything())
 
-spj_desa_tocheck %>% 
-  filter(noto==TRUE) %>%
-  arrange(desa_id) %>% 
-  View()
 
-spj_desa_tocheck %>% filter(trase_id=="R-0074") %>% View()
+spj_desa_checked$checked_implausible %>% summary()
+spj_desa_checked$still_unmatched %>% summary()
+
+# note: trase_id and ibs_firm_id combinations identify fullspj_desa
+fullspj_desa %>% distinct(trase_id, ibs_firm_id) %>% nrow() == nrow(fullspj_desa)
+
+fullspj_desa_checked <- 
+  fullspj_desa %>% 
+  mutate(ibs_firm_id = as.character(ibs_firm_id)) %>% 
+  left_join(spj_desa_checked %>% select(trase_id, ibs_firm_id, still_unmatched), 
+            by = c("trase_id", "ibs_firm_id")) %>% 
+  # extend the still_unmatched flag to those that didn't get a desa match
+  mutate(matched = case_when(
+    still_unmatched | is.na(still_unmatched) ~ FALSE, 
+    TRUE ~ TRUE
+    ), 
+    still_unmatched = case_when(
+      is.na(still_unmatched) ~ TRUE, 
+      TRUE ~ still_unmatched
+    ))
+fullspj_desa_checked %>% distinct(trase_id, ibs_firm_id) %>% nrow() == nrow(fullspj_desa_checked)
 
 
-trase_unmatchedyet <- 
-  trase %>% 
-  filter(!(trase_id %in% spj_desa_solved$trase_id))
+fullspj_desa_checked$matched %>% summary()
+fullspj_desa_checked$still_unmatched %>% summary()
+
+fullspj_desa_checked %>% filter(matched == still_unmatched)
+
+fullspj_desa_checked  %>% 
+  select(trase_id, ibs_firm_id, matched, still_unmatched, everything()) %>% View()
+
+# OK now var. matched really is TRUE only for good matches. rows flaged FALSE either matched a desa but then not an ibs firmn, or not even a desa.  
+# This is all these FALSE that we work on in the next step, at the Kabupaten level. 
+
+desa_match_final <- 
+  fullspj_desa_checked %>% 
+  filter(matched)
+
+desa_still_unmatched <- 
+  fullspj_desa_checked %>% 
+  filter(!matched) # equivalent to still_unmatched
+
+desa_match_final$ibs_firm_id %>% duplicated() %>% any()
+desa_match_final$trase_id %>% duplicated() %>% any()
+
+
+
+## MATCH TRASE-IBS BY KABUPATEN ####
+
+# Remove trase refineries already matched based on desa and manually verified
+desa_still_unmatched <- 
+  fullspj_desa_checked %>% 
+  filter(still_unmatched)
+
+desa_still_unmatched <- 
+  desa_still_unmatched %>% 
+  st_as_sf(coords = c("longitude", "latitude"), crs = 4326, remove = FALSE) %>% 
+  filter(!st_is_empty(geometry))
+
+# Remove ibs plants already matched based on desa and manually verified
+ibs_md_cs_desa_match_final <-
+  ibs_md_cs %>% 
+  filter(ibs_firm_id %in% desa_match_final$ibs_firm_id)
+
+ibs_md_cs_shp_still_um <- 
+  ibs_md_cs_shp %>% 
+  filter(!ibs_firm_id %in% desa_match_final$ibs_firm_id) 
+
+ibs_md_cs_shp$ibs_firm_id %>% duplicated() %>% any()
+ibs_md_cs_desa_match_final$ibs_firm_id %>% duplicated() %>% any()
+ibs_md_cs_shp_still_um$ibs_firm_id %>% duplicated() %>% any()
+
+nrow(ibs_md_cs_shp) - nrow(ibs_md_cs_shp_still_um) - nrow(ibs_md_cs_desa_match_final)
+
+# note there was one ibs plant matched based on its desa polygon but which has no valid kabu polygon.  
+# ibs_md_cs_desa_match_final %>% filter(st_is_empty(geometry)) %>% nrow()
+
+# desa_match_final$ibs_firm_id[!desa_match_final$ibs_firm_id %in% ibs_md_cs_shp_still_um$ibs_firm_id]
+
 
 #### Spatial join #### 
 sf_use_s2(FALSE)
-fullspj_kabu <- st_join(x = trase_unmatchedyet, y = ibs_md_cs_nodesa_kabu, left = T) # the default is st_intersect.
+fullspj_kabu <- st_join(x = desa_still_unmatched, y = ibs_md_cs_shp_still_um, left = T, join = st_within) # the default is st_intersect.
 fullspj_kabu <- st_drop_geometry(fullspj_kabu)
 
 
